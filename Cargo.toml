@@ -18,6 +18,7 @@ exclude = [
 ]
 
 [dependencies]
+log = "*"
 clippy = { version = "0.0.91", optional = true }
 
 [features]

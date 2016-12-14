@@ -101,259 +101,32 @@
 
 #[cfg(all(test, feature = "unstable"))] extern crate test;
 
+#[macro_use]
+extern crate log;
+
 use std::io::prelude::*;
 use std::io::BufReader;
 use std::path::Path;
 use std::fs::File;
 use std::collections::HashMap;
 use std::str::{FromStr, SplitWhitespace};
-use std::fmt;
-use std::error::Error;
 
-/// A mesh made up of triangles loaded from some OBJ file
-///
-/// It is assumed that all meshes will at least have positions, but normals and texture coordinates
-/// are optional. If no normals or texture coordinates where found then the corresponding vecs for
-/// the mesh will be empty. Values are stored packed as floats in vecs, eg. the positions member of
-/// a loaded mesh will contain `[x, y, z, x, y, z, ...]` which you can then use however you like.
-/// Indices are also loaded and may re-use vertices already existing in the mesh, this data is
-/// stored in the `indices` member.
-///
-/// # Example:
-/// Load the Cornell box and get the attributes of the first vertex. It's assumed all meshes will
-/// have positions (required), but normals and texture coordinates are optional, in which case the
-/// corresponding Vec will be empty.
-///
-/// ```
-/// use std::path::Path;
-///
-/// let cornell_box = tobj::load_obj(&Path::new("cornell_box.obj"));
-/// assert!(cornell_box.is_ok());
-/// let (models, materials) = cornell_box.unwrap();
-///
-/// let mesh = &models[0].mesh;
-/// let i = mesh.indices[0] as usize;
-/// // pos = [x, y, z]
-/// let pos = [mesh.positions[i * 3], mesh.positions[i * 3 + 1],
-///             mesh.positions[i * 3 + 2]];
-///
-/// if !mesh.normals.is_empty() {
-///     // normal = [x, y, z]
-///     let normal = [mesh.normals[i * 3], mesh.normals[i * 3 + 1],
-///                   mesh.normals[i * 3 + 2]];
-/// }
-///
-/// if !mesh.texcoords.is_empty() {
-///     // texcoord = [u, v];
-///     let texcoord = [mesh.texcoords[i * 2], mesh.texcoords[i * 2 + 1]];
-/// }
-/// ```
-#[derive(Debug, Clone)]
-pub struct Mesh {
-    /// Flattened 3 component floating point vectors, storing positions of vertices in the mesh
-    pub positions: Vec<f32>,
-    /// Flattened 3 component floating point vectors, storing normals of vertices in the mesh. Not
-    /// all meshes have normals, if no normals are specified this Vec will be empty
-    pub normals: Vec<f32>,
-    /// Flattened 2 component floating point vectors, storing texture coordinates of vertices in
-    /// the mesh. Not all meshes have normals, if no texture coordinates are specified this Vec
-    /// will be empty
-    pub texcoords: Vec<f32>,
-    /// Indices for vertices of each triangle. Each face in the mesh is a triangle and the indices
-    /// specify the position, normal and texture coordinate for each vertex of the face.
-    pub indices: Vec<u32>,
-    /// Optional material id associated with this mesh. The material id indexes into the Vec of
-    /// Materials loaded from the associated MTL file
-    pub material_id: Option<usize>,
-}
+// External types
+pub use types::{
+    LoadResult,
+    MTLLoadResult,
+    LoadError,
+    Material,
+    Model,
+    Mesh,
+};
+// Internal types
+use types::{
+    VertexIndices,
+    Face,
+};
 
-impl Mesh {
-    /// Create a new mesh specifying the geometry for the mesh
-    pub fn new(pos: Vec<f32>, norm: Vec<f32>, tex: Vec<f32>, indices: Vec<u32>, material_id: Option<usize>)
-        -> Mesh {
-        Mesh { positions: pos, normals: norm, texcoords: tex, indices: indices, material_id: material_id }
-    }
-    /// Create a new empty mesh
-    pub fn empty() -> Mesh {
-        Mesh { positions: Vec::new(), normals: Vec::new(), texcoords: Vec::new(), indices: Vec::new(),
-               material_id: None }
-    }
-}
-
-/// A named model within the file, associates some mesh with a name that was specified with an `o`
-/// or `g` keyword in the OBJ file
-#[derive(Clone, Debug)]
-pub struct Model {
-    /// Mesh used by the model containing its geometry
-    pub mesh: Mesh,
-    /// Name assigned to this mesh
-    pub name: String,
-}
-
-impl Model {
-    /// Create a new model, associating a name with a mesh
-    pub fn new(mesh: Mesh, name: String) -> Model {
-        Model { mesh: mesh, name: name }
-    }
-}
-
-/// A material that may be referenced by one or more meshes. Standard MTL attributes are supported.
-/// Any unrecognized parameters will be stored as key-value pairs in the `unknown_param` `HashMap`,
-/// which maps the unknown parameter to the value set for it.
-#[derive(Clone, Debug)]
-pub struct Material {
-    /// Material name as specified in the MTL file
-    pub name: String,
-    /// Ambient color of the material
-    pub ambient: [f32; 3],
-    /// Diffuse color of the material
-    pub diffuse: [f32; 3],
-    /// Specular color of the material
-    pub specular: [f32; 3],
-    /// Material shininess attribute
-    pub shininess: f32,
-    /// Dissolve attribute is the alpha term for the material. Referred to as dissolve since that's
-    /// what the MTL file format docs refer to it as
-    pub dissolve: f32,
-    /// Name of the ambient texture file for the material. No path is pre-pended to the texture
-    /// file names specified in the MTL file
-    pub ambient_texture: String,
-    /// Name of the diffuse texture file for the material. No path is pre-pended to the texture
-    /// file names specified in the MTL file
-    pub diffuse_texture: String,
-    /// Name of the specular texture file for the material. No path is pre-pended to the texture
-    /// file names specified in the MTL file
-    pub specular_texture: String,
-    /// Name of the normal map texture file for the material. No path is pre-pended to the texture
-    /// file names specified in the MTL file
-    pub normal_texture: String,
-    /// Name of the alpha map texture file for the material. No path is pre-pended to the texture
-    /// file names specified in the MTL file. Referred to as dissolve to match the MTL file format
-    /// specification
-    pub dissolve_texture: String,
-    /// Key value pairs of any unrecognized parameters encountered while parsing the material
-    pub unknown_param: HashMap<String, String>,
-}
-
-impl Material {
-    pub fn empty() -> Material {
-        Material { name: String::new(), ambient: [0.0; 3], diffuse: [0.0; 3], specular: [0.0; 3],
-                   shininess: 0.0, dissolve: 1.0, ambient_texture: String::new(),
-                   diffuse_texture: String::new(), specular_texture: String::new(),
-                   normal_texture: String::new(), dissolve_texture: String::new(),
-                   unknown_param: HashMap::new() }
-    }
-}
-
-/// Possible errors that may occur while loading OBJ and MTL files
-#[derive(Debug)]
-pub enum LoadError {
-    OpenFileFailed,
-    ReadError,
-    UnrecognizedCharacter,
-    PositionParseError,
-    NormalParseError,
-    TexcoordParseError,
-    FaceParseError,
-    MaterialParseError,
-    InvalidObjectName,
-    GenericFailure,
-}
-
-impl fmt::Display for LoadError {
-    fn fmt(&self, f: &mut fmt::Formatter) -> Result<(), fmt::Error> {
-        f.write_str(self.description())
-    }
-}
-
-impl Error for LoadError {
-    fn description(&self) -> &str {
-        match *self {
-            LoadError::OpenFileFailed =>
-                "open file failed",
-            LoadError::ReadError =>
-                "read error",
-            LoadError::UnrecognizedCharacter =>
-                "unrecognized character",
-            LoadError::PositionParseError =>
-                "position parse error",
-            LoadError::NormalParseError =>
-                "normal parse error",
-            LoadError::TexcoordParseError =>
-                "texcoord parse error",
-            LoadError::FaceParseError =>
-                "face parse error",
-            LoadError::MaterialParseError =>
-                "material parse error",
-            LoadError::InvalidObjectName =>
-                "invalid object name",
-            LoadError::GenericFailure =>
-                "generic failure",
-        }
-    }
-}
-
-
-/// `LoadResult` is a result containing all the models loaded from the file and any materials from
-/// referenced material libraries, or an error that occured while loading
-pub type LoadResult = Result<(Vec<Model>, Vec<Material>), LoadError>;
-
-/// `MTLLoadResult` is a result containing all the materials loaded from the file and a map of MTL
-/// name to index or the error that occured while loading
-pub type MTLLoadResult = Result<(Vec<Material>, HashMap<String, usize>), LoadError>;
-
-/// Struct storing indices corresponding to the vertex
-/// Some vertices may not have texcoords or normals, 0 is used to indicate this
-/// as OBJ indices begin at 1
-#[derive(Hash, Eq, PartialEq, PartialOrd, Ord, Debug, Copy, Clone)]
-struct VertexIndices {
-    pub v: isize,
-    pub vt: isize,
-    pub vn: isize,
-}
-
-impl VertexIndices {
-    /// Parse the vertex indices from the face string
-    /// Valid face strings are those that are valid for a Wavefront OBJ file
-    /// Also handles relative face indices (negative values) which is why passing the number of
-    /// positions, texcoords and normals is required
-    /// Returns None if the face string is invalid
-    fn parse(face_str: &str, pos_sz: usize, tex_sz: usize, norm_sz: usize) -> Option<VertexIndices> {
-        let mut indices = [-1; 3];
-        for i in face_str.split('/').enumerate() {
-            // Catch case of v//vn where we'll find an empty string in one of our splits
-            // since there are no texcoords for the mesh
-            if !i.1.is_empty() {
-                match isize::from_str(i.1) {
-                    Ok(x) => {
-                        // Handle relative indices
-                        indices[i.0] =
-                            if x < 0 {
-                                match i.0 {
-                                    0 => x + pos_sz as isize,
-                                    1 => x + tex_sz as isize,
-                                    2 => x + norm_sz as isize,
-                                    _ => panic!("Invalid number of elements for a face (> 3)!"),
-                                }
-                            } else {
-                                x - 1
-                            };
-                    },
-                    Err(_) => return None,
-                }
-            }
-        }
-        Some(VertexIndices { v: indices[0], vt: indices[1], vn: indices[2] })
-    }
-}
-
-/// Enum representing either a quad or triangle face, storing indices for the face vertices
-#[derive(Debug)]
-enum Face {
-    Triangle(VertexIndices, VertexIndices, VertexIndices),
-    Quad(VertexIndices, VertexIndices, VertexIndices, VertexIndices),
-    Polygon(Vec<VertexIndices>),
-}
+mod types;
 
 /// Parse the floatn information from the words, words is an iterator over the float strings
 /// Returns false if parsing failed
@@ -436,11 +209,16 @@ fn add_vertex(mesh: &mut Mesh, index_map: &mut HashMap<VertexIndices, u32>, vert
 }
 
 /// Export a list of faces to a mesh and return it, converting quads to tris
-fn export_faces(pos: &[f32], texcoord: &[f32], normal: &[f32], faces: &[Face],
-                mat_id: Option<usize>) -> Mesh {
+fn export_faces(
+    pos: &[f32],
+    texcoord: &[f32],
+    normal: &[f32],
+    faces: &[Face],
+    mat_id: Option<String>,
+) -> Mesh {
     let mut index_map = HashMap::new();
     let mut mesh = Mesh::empty();
-    mesh.material_id = mat_id;
+    mesh.material = mat_id;
     for f in faces {
         // Optimized paths for Triangles and Quads, Polygon handles the general case of an unknown
         // length triangle fan
@@ -480,12 +258,12 @@ pub fn load_obj(file_name: &Path) -> LoadResult {
     let file = match File::open(file_name) {
         Ok(f) => f,
         Err(e) => {
-            println!("tobj::load_obj - failed to open {:?} due to {}", file_name, e);
+            debug!("tobj::load_obj - failed to open {:?} due to {}", file_name, e);
             return Err(LoadError::OpenFileFailed);
         },
     };
     let mut reader = BufReader::new(file);
-    load_obj_buf(&mut reader, file_name.parent())
+    parse_obj(&mut reader)
 }
 
 /// Load the materials defined in a MTL file
@@ -495,7 +273,7 @@ pub fn load_mtl(file_name: &Path) -> MTLLoadResult {
     let file = match File::open(file_name) {
         Ok(f) => f,
         Err(e) => {
-            println!("tobj::load_mtl - failed to open {:?} due to {}", file_name, e);
+            debug!("tobj::load_mtl - failed to open {:?} due to {}", file_name, e);
             return Err(LoadError::OpenFileFailed);
         },
     };
@@ -505,10 +283,9 @@ pub fn load_mtl(file_name: &Path) -> MTLLoadResult {
 
 /// Load the various meshes in an OBJ buffer. `base_path` specifies the path prefix to apply to
 /// referenced material libs
-fn load_obj_buf<B: BufRead>(reader: &mut B, base_path: Option<&Path>) -> LoadResult {
+pub fn parse_obj<B: BufRead>(reader: &mut B) -> LoadResult {
     let mut models = Vec::new();
-    let mut materials = Vec::new();
-    let mut mat_map = HashMap::new();
+    let mut material_libraries = Vec::new();
 
     let mut tmp_pos = Vec::new();
     let mut tmp_texcoord = Vec::new();
@@ -522,7 +299,7 @@ fn load_obj_buf<B: BufRead>(reader: &mut B, base_path: Option<&Path>) -> LoadRes
         let (line, mut words) = match line {
             Ok(ref line) => (&line[..], line[..].split_whitespace()),
             Err(e) => {
-                println!("tobj::load_obj - failed to read line due to {}", e);
+                debug!("tobj::load_obj - failed to read line due to {}", e);
                 return Err(LoadError::ReadError);
             },
         };
@@ -555,8 +332,18 @@ fn load_obj_buf<B: BufRead>(reader: &mut B, base_path: Option<&Path>) -> LoadRes
                 // If we were already parsing an object then a new object name
                 // signals the end of the current one, so push it onto our list of objects
                 if !name.is_empty() && !tmp_faces.is_empty() {
-                    models.push(Model::new(export_faces(&tmp_pos, &tmp_texcoord, &tmp_normal,
-                                                        &tmp_faces, mat_id), name));
+                    models.push(
+                        Model::new(
+                            export_faces(
+                                &tmp_pos,
+                                &tmp_texcoord,
+                                &tmp_normal,
+                                &tmp_faces,
+                                mat_id.take(),
+                            ),
+                            name
+                        )
+                    );
                     tmp_faces.clear();
                 }
                 name = line[1..].trim().to_owned();
@@ -566,35 +353,14 @@ fn load_obj_buf<B: BufRead>(reader: &mut B, base_path: Option<&Path>) -> LoadRes
             },
             Some("mtllib") => {
                 if let Some(mtllib) = words.next() {
-                    let mat_file = match base_path {
-                        Some(bp) => bp.join(mtllib),
-                        None => Path::new(mtllib).to_path_buf(),
-                    };
-                    match load_mtl(mat_file.as_path()) {
-                        Ok((mut mats, map)) => {
-                            // Merge the loaded material lib with any currently loaded ones, offsetting
-                            // the indices of the appended materials by our current length
-                            let mat_offset = materials.len();
-                            materials.append(&mut mats);
-                            for m in map {
-                                mat_map.insert(m.0, m.1 + mat_offset);
-                            }
-                        },
-                        Err(e) => return Err(e),
-                    }
+                    material_libraries.push(mtllib.to_owned());
                 } else {
                     return Err(LoadError::MaterialParseError);
                 }
             },
             Some("usemtl") => {
                 if let Some(mat_name) = words.next() {
-                    match mat_map.get(mat_name) {
-                        Some(m) => mat_id = Some(*m),
-                        None => {
-                            mat_id = None;
-                            println!("Warning: Object {} refers to unfound material: {}", name, mat_name);
-                        }
-                    }
+                    mat_id = Some(mat_name.into());
                 } else {
                     return Err(LoadError::MaterialParseError);
                 }
@@ -608,33 +374,33 @@ fn load_obj_buf<B: BufRead>(reader: &mut B, base_path: Option<&Path>) -> LoadRes
     if !name.is_empty() {
         models.push(Model::new(export_faces(&tmp_pos, &tmp_texcoord, &tmp_normal, &tmp_faces, mat_id), name));
     }
-    Ok((models, materials))
+    Ok((models, material_libraries))
 }
 
 /// Load the various materials in a MTL buffer
 fn load_mtl_buf<B: BufRead>(reader: &mut B) -> MTLLoadResult {
-    let mut materials = Vec::new();
-    let mut mat_map = HashMap::new();
+    let mut materials = HashMap::new();
     // The current material being parsed
     let mut cur_mat = Material::empty();
+
     for line in reader.lines() {
         let (line, mut words) = match line {
             Ok(ref line) => (&line[..], line[..].split_whitespace()),
             Err(e) => {
-                println!("tobj::load_obj - failed to read line due to {}", e);
+                debug!("tobj::load_obj - failed to read line due to {}", e);
                 return Err(LoadError::ReadError);
             },
         };
         match words.next() {
             Some("#") | None => continue,
+            // TODO: export these all to constants?
             Some("newmtl") => {
                 // If we were passing a material save it out to our vector
                 if !cur_mat.name.is_empty() {
-                    mat_map.insert(cur_mat.name.clone(), materials.len());
-                    materials.push(cur_mat);
+                    materials.insert(cur_mat.name.clone(), cur_mat);
                 }
                 cur_mat = Material::empty();
-                cur_mat.name = line[6..].trim().to_owned();
+                cur_mat.name = line["newmtl".len()..].trim().to_owned();
                 if cur_mat.name.is_empty() {
                     return Err(LoadError::InvalidObjectName);
                 }
@@ -714,10 +480,9 @@ fn load_mtl_buf<B: BufRead>(reader: &mut B) -> MTLLoadResult {
     }
     // Finalize the last material we were parsing
     if !cur_mat.name.is_empty() {
-        mat_map.insert(cur_mat.name.clone(), materials.len());
-        materials.push(cur_mat);
+        materials.insert(cur_mat.name.clone(), cur_mat);
     }
-    Ok((materials, mat_map))
+    Ok(materials)
 }
 
 /// Print out all loaded properties of some models and associated materials
@@ -727,7 +492,7 @@ pub fn print_model_info(models: &[Model], materials: &[Material]) {
     for (i, m) in models.iter().enumerate() {
         let mesh = &m.mesh;
         println!("model[{}].name = \'{}\'", i, m.name);
-        println!("model[{}].mesh.material_id = {:?}", i, mesh.material_id);
+        println!("model[{}].mesh.material = {:?}", i, mesh.material);
 
         println!("Size of model[{}].indices: {}", i, mesh.indices.len());
         for f in 0..mesh.indices.len() / 3 {
