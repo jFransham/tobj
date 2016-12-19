@@ -278,7 +278,7 @@ pub fn load_mtl(file_name: &Path) -> MTLLoadResult {
         },
     };
     let mut reader = BufReader::new(file);
-    load_mtl_buf(&mut reader)
+    parse_mtl(&mut reader)
 }
 
 /// Load the various meshes in an OBJ buffer. `base_path` specifies the path prefix to apply to
@@ -378,7 +378,7 @@ pub fn parse_obj<B: BufRead>(reader: &mut B) -> LoadResult {
 }
 
 /// Load the various materials in a MTL buffer
-fn load_mtl_buf<B: BufRead>(reader: &mut B) -> MTLLoadResult {
+pub fn parse_mtl<B: BufRead>(reader: &mut B) -> MTLLoadResult {
     let mut materials = HashMap::new();
     // The current material being parsed
     let mut cur_mat = Material::empty();
